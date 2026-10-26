@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0B0F14">
+<title>Find HEX 1</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,800&family=DM+Sans:wght@400;600&family=Silkscreen&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #0B0F14; --panel: #151A1F; --line: #232B33; --fg: #F6F5F1; --muted: #8C98A5; --cyan: #5FF0FF; --orange: #FF5A36; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: "DM Sans", system-ui, sans-serif;
+         display: grid; grid-template-rows: auto 1fr auto; min-height: 100svh; padding: 20px 16px calc(18px + env(safe-area-inset-bottom)); }
+  header { text-align: center; }
+  .tag { font-family: "Silkscreen", monospace; font-size: 12px; letter-spacing: .12em; color: var(--muted); }
+  h1 { margin: 6px 0 0; font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: 30px; letter-spacing: -.01em; }
+  h1 span { color: var(--cyan); }
+  main { display: grid; justify-items: center; align-content: center; gap: 22px; }
+
+  /* HEX 1 face: the real eyes on a round black screen */
+  .face { width: min(86vw, 340px); aspect-ratio: 1; padding: 12px; border-radius: 50%; background: var(--panel); border: 1px solid var(--line); }
+  .screen { width: 100%; height: 100%; background: #000; border-radius: 50%; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; filter: drop-shadow(0 0 3px rgba(95, 240, 255, .35)); }
+  .ringing canvas { filter: drop-shadow(0 0 3px rgba(255, 90, 54, .35)); }
+
+  #find { width: min(100%, 400px); height: 76px; border: 0; border-radius: 999px; cursor: pointer;
+          background: var(--cyan); color: #04232A; font: 800 32px "Bricolage Grotesque", sans-serif; letter-spacing: .03em;
+          transition: transform .12s, background .2s, color .2s; }
+  #find:active { transform: scale(.97); }
+  .searching #find { background: var(--panel); color: var(--cyan); border: 1px solid var(--line); font-size: 24px; }
+  .ringing #find { background: var(--orange); color: #fff; }
+  #status { min-height: 3em; margin: 0; text-align: center; font-size: 16px; max-width: 340px; line-height: 1.4; }
+  #status small { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+  footer { text-align: center; color: var(--muted); font-size: 12px; line-height: 1.5; }
+  #install { display: none; margin: 0 auto 12px; font: 600 15px "DM Sans", sans-serif; color: var(--fg); background: var(--panel);
+             border: 1px solid var(--line); border-radius: 999px; padding: 12px 20px; cursor: pointer; }
+  #install.show { display: inline-block; }
+  .standalone .hint { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <div class="tag">HEXBOTS · FINDER</div>
+  <h1>Find <span>HEX 1</span></h1>
+</header>
+
+<main id="app">
+  <div class="face"><div class="screen"><canvas id="oled" width="450" height="450" aria-label="HEX 1 eyes looking around"></canvas></div></div>
+  <button id="find">FIND</button>
+  <p id="status">Tap Find, then pick <b>HEX1-Larry</b> from the list.</p>
+</main>
+
+<footer>
+  <button id="install">＋ Add Find HEX 1 to your home screen</button>
+  <div class="hint" id="hint">Chrome on Android, or a laptop. On iPhone, open this page in the Bluefy browser.</div>
+  @hexbots.lab
+</footer>
+
+<script>
+// =====================================================================================
+// HEX 1 eyes: a port of drawOneEye() / eyesStep() from screen_eyes.h (curious mode), on a round screen.
+// The whole face glides from corner to corner, looking where it's going; two big white question
+// marks sway and wobble over its head. Smooth: physics runs every frame (small steps) and the face
+// glides between pixels, while the eyes themselves stay crisp pixel art.
+// =====================================================================================
+const S = 150, PX = 3, CX0 = 75, CY0 = 84, RAD = 74;          // round screen (logical px), canvas scale, face centre
+const STEP = 1 / 120;                                          // physics step (s)
+const BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+const cv = document.getElementById('oled'), ctx = cv.getContext('2d');
+const buf = new Uint8Array(S * S);
+const rnd = n => Math.floor(Math.random() * n), frand = (a, b) => a + (b - a) * Math.random();
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v), trunc = Math.trunc;
+const ease = a => 1 - Math.pow(1 - a, STEP / 0.025);           // firmware per-frame (40 Hz) smoothing, any step size
+const pix = (x, y) => { if (x >= 0 && x < S && y >= 0 && y < S) buf[y * S + x] = 1; };
+
+let state = 'idle';                                            // idle | searching | ringing
+const eye = [{ ix: 0, iy: 0, vx: 0, vy: 0 }, { ix: 0, iy: 0, vx: 0, vy: 0 }];
+let eSq = 0, eSqV = 0, eLid = 0, eLidV = 0, ePupil = 5.5, eSurp = 0, eCur = 1;
+let sacc = { x: 0, y: 0 }, nextSacc = 0, lookBack = 0, trackT0 = 0, trackUntil = 0, trackW = 2;
+let nextBlink = 0, blinkEnd = 0, doubleBlink = 0;
+const body = { x: 0, y: 0, vx: 0, vy: 0 };                     // where the whole face is on the screen
+let bodyT = { x: 0, y: 0 }, nextMove = Date.now() + 900;
+const SPOTS = [[-14, -10], [14, -10], [-14, 8], [14, 8], [-16, 0], [16, 0], [0, -10], [0, 0]];
+
+function bodyStep(now) {
+  if (state === 'ringing') bodyT = { x: 0, y: 0 };             // ringing: comes to the middle
+  else if (now > nextMove) {                                   // off to another corner
+    let p; do p = SPOTS[rnd(SPOTS.length)]; while (p[0] === bodyT.x && p[1] === bodyT.y);
+    const dx = p[0] - body.x, dy = p[1] - body.y, d = Math.hypot(dx, dy) || 1;
+    bodyT = { x: p[0], y: p[1] };
+    sacc = { x: dx / d * 12, y: dy / d * 8 }; nextSacc = now + 650; trackUntil = 0; lookBack = 0;   // looks where it's going
+    eSqV -= 3;                                                 // a little hop as it sets off
+    nextMove = now + (state === 'searching' ? 1000 + rnd(700) : 1900 + rnd(1700));
+  }
+  body.vx += (22 * (bodyT.x - body.x) - 7.5 * body.vx) * STEP; // soft spring: glides over, small overshoot
+  body.vy += (22 * (bodyT.y - body.y) - 7.5 * body.vy) * STEP;
+  body.x += body.vx * STEP; body.y += body.vy * STEP;
+}
+
+function eyesStep(now) {
+  const ringing = state === 'ringing', fast = state === 'searching' ? 0.6 : 1;
+  eSurp += ((ringing ? 1 : 0) - eSurp) * ease(0.25);
+  eCur += ((ringing ? 0 : 1) - eCur) * ease(0.05);
+  bodyStep(now);
+  if (ringing) { sacc = { x: 0, y: 0 }; trackUntil = 0; }      // ringing: looks right at you, wide eyes
+  else if (now < trackUntil) {                                 // following something that moves around
+    const t = (now - trackT0) * 0.001;
+    sacc = { x: 12.5 * Math.sin(t * trackW + 0.7) + 2 * Math.sin(t * 3.1), y: 7.5 * Math.sin(t * trackW * 1.37) + 1.5 * Math.sin(t * 4.3) };
+    nextSacc = now + 250 + rnd(350);
+  } else if (now > nextSacc) {
+    const was = sacc;
+    if (lookBack !== 0) { sacc = { x: lookBack * frand(10, 13), y: frand(-2, 2) }; lookBack = 0; nextSacc = now + (380 + rnd(250)) * fast; }
+    else {
+      const r = rnd(20), side = Math.random() < 0.5 ? 1 : -1;
+      if (r < 2)       { sacc = { x: 0, y: 0 }; nextSacc = now + (700 + rnd(900)) * fast; }                       // a look back at you
+      else if (r < 5)  { trackT0 = now; trackUntil = now + 1500 + rnd(2000); trackW = frand(1.3, 2.4); }           // spots something
+      else if (r < 8)  { sacc = { x: side * frand(10, 13), y: frand(-2, 2) }; lookBack = -side; nextSacc = now + (380 + rnd(250)) * fast; }   // quick left-right check
+      else if (r < 12) { sacc = { x: side * frand(10, 13), y: Math.random() < 0.5 ? frand(-9, -6) : frand(5, 8) }; nextSacc = now + (450 + rnd(900)) * fast; }   // a corner
+      else             { sacc = { x: frand(-13, 13), y: frand(-9, 8) }; nextSacc = now + (350 + rnd(850)) * fast; }   // anywhere
+    }
+    if (Math.abs(sacc.x - was.x) + Math.abs(sacc.y - was.y) > 14 && rnd(4) === 0 && now > blinkEnd + 300) blinkEnd = now + 90;
+  }
+  for (let i = 0; i < 2; i++) {                                // iris springs (slightly underdamped = wobble)
+    const e = eye[i], k = i ? 190 : 175;
+    const ax = k * (sacc.x - e.ix) - 11 * e.vx - body.vx * 4, ay = k * (sacc.y - e.iy) - 11 * e.vy - body.vy * 4;   // inertia as it glides
+    e.vx += ax * STEP; e.vy += ay * STEP; e.ix = clamp(e.ix + e.vx * STEP, -15, 15); e.iy = clamp(e.iy + e.vy * STEP, -16, 16);
+  }
+  eSqV += (-260 * eSq - 9 * eSqV) * STEP; eSq = clamp(eSq + eSqV * STEP, -0.3, 0.3);   // squash & stretch spring
+  if (now > nextBlink) { blinkEnd = now + 90; nextBlink = now + 1800 + rnd(3800); if (rnd(5) === 0) doubleBlink = now + 250; }
+  if (doubleBlink && now > doubleBlink) { blinkEnd = now + 80; doubleBlink = 0; }
+  let lidT = -0.15 * eSurp - 0.06 * eCur;
+  if (now < blinkEnd) lidT = 1;
+  eLidV += (700 * (lidT - eLid) - 40 * eLidV) * STEP; eLid = clamp(eLid + eLidV * STEP, -0.15, 1);
+  const pr = 5.5 - 2.4 * eSurp + 0.9 * eCur + 0.35 * Math.sin(now * 0.003);
+  ePupil += (pr - ePupil) * ease(0.2);
+}
+
+const inCircle = (px, py, cx, cy, r) => { const dx = px - cx, dy = py - cy; return dx * dx + dy * dy <= r * r; };
+
+function drawOneEye(i, fx, fy) {                               // fx, fy = face centre (whole pixels)
+  const ex = fx + (i ? 32 : -32), ey = fy, side = i ? 1 : -1, e = eye[i];
+  const s = 1 + 0.12 * eSurp;
+  const rx = trunc(21 * s * (1 + 0.5 * eSq) + 0.5), ry = Math.min(trunc(25 * s * (1 - 0.5 * eSq) + 0.5), 31);
+  const icx = ex + Math.round(e.ix), icy = ey + Math.round(e.iy);
+  const rI = trunc(13 * s * (1 - 0.08 * eSurp) + 0.5), rP = trunc(ePupil + 0.5);
+  const rI2 = rI * rI, rIn2 = (rI - 1) * (rI - 1), rP2 = rP * rP;
+  const ringLo = trunc(0.5 * rI * 0.5 * rI), ringHi = trunc(0.7 * rI * 0.7 * rI);
+  const h1x = icx - trunc(rI * 0.38 + e.ix * 0.12), h1y = icy - trunc(rI * 0.42 + e.iy * 0.12), h1r = Math.max(2, trunc(rI * 0.3 + 0.5));
+  const h2x = icx + trunc(rI * 0.36), h2y = icy + trunc(rI * 0.34), h2r = Math.max(1, trunc(rI * 0.13 + 0.5));
+  const topAmt = Math.max(0, eLid), botAmt = Math.max(0, eLid - 0.5) * 2;
+  const tilt = -0.10 * eSurp * side;
+  for (let x = -rx; x <= rx; x++) {
+    const px = ex + x;
+    const f = 1 - (x * x) / (rx * rx); if (f < 0) continue;
+    const hh = ry * Math.sqrt(f);
+    if (hh < 1.5) continue;
+    const yTop = Math.ceil(-hh + topAmt * 1.2 * hh + tilt * x), yBot = Math.floor(hh - botAmt * 0.8 * hh);
+    if (yTop > yBot) {                                         // closed: a soft curved lash line
+      const yl = ey + Math.round(0.2 * hh);
+      if (hh > 2) { pix(px, yl); pix(px, yl + 1); }
+      continue;
+    }
+    for (let y = yTop; y <= yBot; y++) {
+      const py = ey + y;
+      const dx = px - icx, dy = py - icy, d2 = dx * dx + dy * dy, b = BAYER[(py - fy) & 3][(px - fx) & 3];   // dither moves with the face
+      let lit;
+      if (d2 <= rI2) {
+        if (inCircle(px, py, h1x, h1y, h1r) || inCircle(px, py, h2x, h2y, h2r)) lit = true;   // sparkles
+        else if (d2 <= rP2) lit = false;                       // pupil
+        else if (d2 >= rIn2) lit = false;                      // dark rim
+        else {
+          const t = trunc((dy + rI) * 16 / (2 * rI));          // 0 top .. 16 bottom
+          lit = dy > 0 && d2 >= ringLo && b < trunc((t * t) / 20);   // glowing crescent in the lower iris
+          if (!lit && dy < 0 && d2 >= ringHi && b === 0) lit = true; // a few specks in the upper iris
+        }
+      } else {
+        lit = true;                                            // sclera
+        if (y - yTop < 2) lit = b >= 8;                        // soft shadow under the lid
+      }
+      if (lit) pix(px, py);
+    }
+  }
+}
+
+// ---------- sound waves while it rings (same as the HEX 1 screen)
+function drawWaves(now, fx, fy) {
+  if (state !== 'ringing') return;
+  const wave = trunc(now / 140) % 4;
+  for (const side of [-1, 1]) {
+    const cx = fx + side * 49;
+    for (let k = 0; k < wave && k < 3; k++) {
+      const r = 5 + 4 * k;
+      for (let a = -35; a <= 35; a += 5) { const t = a * 0.01745; pix(cx + side * Math.round(Math.cos(t) * r), fy + Math.round(Math.sin(t) * r)); }
+    }
+  }
+}
+
+// ---------- two big white question marks over its head: sway left-right and wobble (drawn smooth)
+const QG = ['..#####..', '.#######.', '##.....##', '##.....##', '......##.', '.....##..', '....##...', '....##...', '.........', '....##...', '....##...'];
+const QW = 9, QH = 11, QS = 2;                                 // glyph cells, each 2 x 2 screen pixels
+let qAmt = 1;                                                  // fades out while ringing
+function drawQuestions(now) {
+  qAmt += ((state === 'ringing' ? 0 : 1) - qAmt) * 0.12;
+  if (qAmt < 0.02) return;
+  const t = now * 0.001 * (state === 'searching' ? 1.6 : 1);
+  ctx.fillStyle = '#F6F5F1'; ctx.globalAlpha = qAmt;
+  for (const [dx, ph] of [[-20, 0], [20, 1.9]]) {
+    const x = CX0 + body.x + dx + 7 * Math.sin(t * 1.5 + ph);   // drifts left and right
+    const y = CY0 + body.y - 42 + 2 * Math.sin(t * 3.4 + ph) + 6 * (1 - qAmt);
+    const ang = 0.32 * Math.sin(t * 2.6 + ph * 1.3);           // wobbles
+    ctx.save(); ctx.translate(x * PX, y * PX); ctx.rotate(ang);
+    const c = QS * PX;
+    for (let r = 0; r < QH; r++) for (let k = 0; k < QW; k++) if (QG[r][k] === '#')
+      ctx.fillRect((k - QW / 2) * c, (r - QH / 2) * c, c - 0.5, c - 0.5);
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function render(now, fracX, fracY) {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(S * PX / 2, S * PX / 2, (RAD - 0.5) * PX, 0, Math.PI * 2); ctx.clip();   // round screen
+  ctx.save(); ctx.translate(fracX * PX, fracY * PX);           // the face glides between pixels
+  ctx.fillStyle = state === 'ringing' ? '#FF5A36' : '#5FF0FF';
+  for (let y = 0; y < S; y++) { const row = y * S; for (let x = 0; x < S; x++) if (buf[row + x]) ctx.fillRect(x * PX, y * PX, PX - 0.5, PX - 0.5); }   // OLED dots
+  ctx.restore();
+  drawQuestions(now);
+  ctx.restore();
+}
+
+let last = performance.now(), acc = 0;
+function frame(t) {
+  acc += Math.min(100, t - last) / 1000; last = t;
+  const now = Date.now();
+  while (acc >= STEP) { eyesStep(now); acc -= STEP; }
+  const bx = CX0 + body.x, by = CY0 + body.y, fx = Math.floor(bx), fy = Math.floor(by);
+  buf.fill(0);
+  drawOneEye(0, fx, fy); drawOneEye(1, fx, fy); drawWaves(now, fx, fy);
+  render(now, bx - fx, by - fy);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+const bounce = () => { eSqV -= 6; };                           // a little squash when you tap
+
+// =====================================================================================
+// Bluetooth
+// =====================================================================================
+const SERVICE = 'b7e1a001-7c4f-4d2a-9b61-4845585f4c31';
+const CMD     = 'b7e1a002-7c4f-4d2a-9b61-4845585f4c31';
+const CHECKIN_S = 60;        // must match BLE_CHECKIN_S in ble_find.h
+const RING_MS   = 5000;      // must match BLE_RING_MS in ble_find.h
+
+const $ = id => document.getElementById(id);
+const app = $('app'), btn = $('find');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
+const say = (main, sub = '') => $('status').innerHTML = main + (sub ? `<small>${sub}</small>` : '');
+
+let device = null, cmd = null, busy = false, ringTimer = null, cancel = false;
+
+function setState(s) {
+  state = s;
+  app.classList.toggle('searching', s === 'searching');
+  app.classList.toggle('ringing', s === 'ringing');
+  btn.textContent = s === 'ringing' ? 'STOP' : s === 'searching' ? 'SEARCHING…' : 'FIND';
+  clearTimeout(ringTimer);
+  if (s === 'ringing') ringTimer = setTimeout(() => { setState('idle'); say('Did you find it?', 'Tap Find to ring again.'); }, RING_MS + 300);
+}
+
+async function send(text) { await cmd.writeValue(new TextEncoder().encode(text)); }
+
+async function connectOnce() {
+  const server = await withTimeout(device.gatt.connect(), 6000);
+  cmd = await (await server.getPrimaryService(SERVICE)).getCharacteristic(CMD);
+}
+
+// If HEX 1 is asleep it only listens for 2 s once a minute: keep knocking until it answers.
+async function reach() {
+  const t0 = Date.now(); cancel = false; setState('searching');
+  while (!cmd && !cancel) {
+    const s = Math.round((Date.now() - t0) / 1000);
+    say('Looking for HEX 1… ' + s + ' s', `If it's asleep it answers within ${CHECKIN_S} s. Keep this page open.`);
+    try { await connectOnce(); } catch (e) { await sleep(1200); }
+    if (Date.now() - t0 > (CHECKIN_S * 3 + 30) * 1000) { setState('idle'); say('Can\'t reach HEX 1.', 'It may be out of range (about 10–30 m) or the battery is flat.'); return false; }
+  }
+  if (cancel) { setState('idle'); say('Stopped looking.'); }
+  return !!cmd;
+}
+
+async function ring() {
+  await send('RING');
+  setState('ringing'); bounce();
+  say('Ringing… follow the beep!', 'Press the button on HEX 1 when you find it.');
+}
+
+btn.onclick = async () => {
+  bounce();
+  if (busy) { cancel = true; return; }
+  if (state === 'ringing') {                                   // tap again = stop
+    try { if (cmd) await send('STOP'); } catch (e) {}
+    setState('idle'); say('Stopped.'); return;
+  }
+  if (!navigator.bluetooth) { say('This browser can\'t use Bluetooth.', 'Use Chrome on Android, or Bluefy on iPhone.'); return; }
+  busy = true;
+  try {
+    if (!device) {
+      device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
+      device.addEventListener('gattserverdisconnected', () => { cmd = null; });
+    }
+    if (cmd || await reach()) await ring();
+  } catch (e) {
+    setState('idle');
+    if (e.name === 'NotFoundError') say('No HEX 1 picked.', 'If it\'s not in the list, it\'s asleep: tap Find again and wait up to a minute.');
+    else { cmd = null; say('Lost the connection.', 'Tap Find to try again.'); }
+  }
+  busy = false;
+};
+
+// ---------- install as an app (scan the card once, then open it from the home screen)
+const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+if (standalone) document.body.classList.add('standalone');
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+let installEvt = null;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; $('install').classList.add('show'); });
+addEventListener('appinstalled', () => { $('install').classList.remove('show'); say('Installed! Next time, open Find HEX 1 from your home screen.'); });
+$('install').onclick = async () => {
+  if (!installEvt) return;
+  installEvt.prompt(); await installEvt.userChoice; installEvt = null; $('install').classList.remove('show');
+};
+if (/iPhone|iPad/.test(navigator.userAgent) && !navigator.bluetooth)
+  $('hint').innerHTML = 'iPhone: Safari can\'t use Bluetooth. Open this link in the free <b>Bluefy</b> browser, then add it to your home screen.';
+
+// preview hook: ?state=ringing / ?state=searching
+const qs = new URLSearchParams(location.search).get('state'); if (qs) setState(qs);
+</script>
+</body>
+</html>
